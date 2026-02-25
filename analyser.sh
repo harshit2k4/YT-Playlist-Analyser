@@ -10,12 +10,12 @@ check_environment() {
 
     if ! command -v bc &> /dev/null
     then
-        echo "Required tool 'bc' is not found. This is needed for time calculations."
+        echo "Required tool 'bc' is not found. This is needed for math."
         exit 1
     fi
 }
 
-# Function to convert seconds into HH:MM:SS format
+# Function to convert seconds into HH:MM:SS
 format_standard() {
     local seconds=${1%.*}
     if [ -z "$seconds" ] || [ "$seconds" -lt 0 ]; then seconds=0; fi
@@ -43,37 +43,18 @@ format_detailed() {
     if [ -z "$output" ]; then echo "0 seconds"; else echo "$output"; fi
 }
 
-# Function to display time stats for different speeds
-display_speed_table() {
-    local total=$1
-    echo "COMPUTED WATCH TIMES"
-    echo "--------------------------------------------------------------------------------"
-
-    local speeds=("1.00" "1.25" "1.50" "2.00")
-
-    for speed in "${speeds[@]}"
-    do
-        local calc_seconds=$(echo "scale=2; $total / $speed" | bc)
-        local std=$(format_standard "$calc_seconds")
-        local det=$(format_detailed "$calc_seconds")
-        printf "%-10s | %-10s | %s\n" "${speed}x" "$std" "$det"
-    done
-}
-
 # Function to analyze the playlist content
 analyze_playlist() {
     local url=$1
 
     echo "Accessing playlist metadata..."
 
-    # Improved metadata extraction
-    # We use --get-filename as a trick to check if the URL is reachable/valid
     local meta
     meta=$(yt-dlp --flat-playlist --playlist-items 1 --print "playlist_title:%(playlist_title)s|channel:%(uploader)s" "$url" 2>/dev/null | head -n 1)
 
     if [ -z "$meta" ]
     then
-        echo "Error: Unable to access the playlist. The URL may be invalid, private, or blocked."
+        echo "Error: Unable to access the playlist. The URL may be invalid or private."
         return
     fi
 
@@ -90,43 +71,62 @@ analyze_playlist() {
 
     local total_seconds=0
     local count=0
+    local max_sec=0
+    local min_sec=999999
+    local max_title=""
+    local min_title=""
 
-    # Stream processing for memory efficiency
+    # Temporary file for storing the report
+    local report_file="analysis_$(date +%Y%m%d_%H%M%S).txt"
+
     while IFS='|' read -r duration title
     do
-        # Ensure duration is a valid integer
         if [[ ! "$duration" =~ ^[0-9]+$ ]]; then duration=0; fi
 
         count=$((count + 1))
         total_seconds=$((total_seconds + duration))
 
-        local time_label=$(format_standard "$duration")
+        # Track longest and shortest
+        if [ "$duration" -gt "$max_sec" ]; then max_sec=$duration; max_title=$title; fi
+        if [ "$duration" -lt "$min_sec" ] && [ "$duration" -gt 0 ]; then min_sec=$duration; min_title=$title; fi
 
-        # No length limit on title to prevent cutoff
-        printf "[%03d] | %-10s | %s\n" "$count" "$time_label" "$title"
+        local time_label=$(format_standard "$duration")
+        printf "[%03d] | %-10s | %s\n" "$count" "$time_label" "$title" | tee -a "$report_file"
 
     done < <(yt-dlp --flat-playlist --quiet --print "%(duration)s|%(title)s" "$url")
 
-    if [ "$count" -eq 0 ]
-    then
-        echo "The analysis completed but no videos were found in this list."
-        return
-    fi
+    if [ "$count" -eq 0 ]; then echo "No videos found."; return; fi
 
-    echo "--------------------------------------------------------------------------------"
-    echo "SUMMARY"
-    echo "Total Videos Found: $count"
-    echo "Total Duration    : $(format_standard "$total_seconds")"
-    echo "Detailed Duration : $(format_detailed "$total_seconds")"
-    echo "--------------------------------------------------------------------------------"
+    # Calculate Average
+    local avg_sec=$(echo "$total_seconds / $count" | bc)
 
-    display_speed_table "$total_seconds"
+    # Prepare summary output
+    {
+        echo "--------------------------------------------------------------------------------"
+        echo "DETAILED SUMMARY"
+        echo "Total Videos     : $count"
+        echo "Total Duration   : $(format_standard "$total_seconds")"
+        echo "Detailed         : $(format_detailed "$total_seconds")"
+        echo "Average Duration : $(format_standard "$avg_sec")"
+        echo "Longest Video    : $(format_standard "$max_sec") - $max_title"
+        echo "Shortest Video   : $(format_standard "$min_sec") - $min_title"
+        echo "--------------------------------------------------------------------------------"
+        echo "SPEED ANALYSIS"
+
+        local speeds=("1.25" "1.50" "2.00")
+        for speed in "${speeds[@]}"; do
+            local calc=$(echo "scale=2; $total_seconds / $speed" | bc)
+            printf "%-10s : %s (%s)\n" "${speed}x" "$(format_standard "$calc")" "$(format_detailed "$calc")"
+        done
+        echo "--------------------------------------------------------------------------------"
+    } | tee -a "$report_file"
+
+    echo "Analysis complete. A copy has been saved to: $report_file"
 }
 
 # Main interface
 run_app() {
     check_environment
-
     while true
     do
         echo ""
@@ -138,15 +138,13 @@ run_app() {
         echo ""
         read -p "Input: " user_input
 
-        if [[ "$user_input" == "exit" ]]
-        then
+        if [[ "$user_input" == "exit" ]]; then
             echo "Thank you for using YT-Playlist-Analyser. The session has ended."
             break
         fi
 
-        if [[ -z "$user_input" ]]
-        then
-            echo "Notice: No input detected. Please provide a valid URL."
+        if [[ -z "$user_input" ]]; then
+            echo "Notice: No input detected."
             continue
         fi
 
