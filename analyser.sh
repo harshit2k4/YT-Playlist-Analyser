@@ -1,130 +1,157 @@
 #!/bin/bash
 
-# Function to check if the required tools are installed on the system
-check_dependencies() {
+# Function to check if required tools are available
+check_environment() {
     if ! command -v yt-dlp &> /dev/null
     then
-        echo "Error: yt-dlp is missing. Please install it first."
+        echo "Required tool 'yt-dlp' is not found. Please install it to proceed."
         exit 1
     fi
 
     if ! command -v bc &> /dev/null
     then
-        echo "Error: bc is missing. This is needed for the math calculations."
+        echo "Required tool 'bc' is not found. This is needed for time calculations."
         exit 1
     fi
 }
 
-# Function to convert seconds into a human readable format
-# This converts seconds into Hours:Minutes:Seconds
-format_seconds() {
-    local total_seconds=${1%.*}
-    if [[ -z "$total_seconds" || "$total_seconds" -eq 0 ]]
+# Function to convert seconds into HH:MM:SS format
+format_standard() {
+    local seconds=${1%.*}
+    if [ -z "$seconds" ] || [ "$seconds" -lt 0 ]; then seconds=0; fi
+
+    local h=$((seconds / 3600))
+    local m=$(( (seconds % 3600) / 60 ))
+    local s=$((seconds % 60))
+    printf "%02d:%02d:%02d" "$h" "$m" "$s"
+}
+
+# Function to convert seconds into a long human readable string
+format_detailed() {
+    local seconds=${1%.*}
+    if [ -z "$seconds" ] || [ "$seconds" -lt 0 ]; then seconds=0; fi
+
+    local h=$((seconds / 3600))
+    local m=$(( (seconds % 3600) / 60 ))
+    local s=$((seconds % 60))
+
+    local output=""
+    if [ "$h" -gt 0 ]; then output="$h hours "; fi
+    if [ "$m" -gt 0 ]; then output="$output$m minutes "; fi
+    if [ "$s" -gt 0 ]; then output="$output$s seconds"; fi
+
+    if [ -z "$output" ]; then echo "0 seconds"; else echo "$output"; fi
+}
+
+# Function to display time stats for different speeds
+display_speed_table() {
+    local total=$1
+    echo "COMPUTED WATCH TIMES"
+    echo "--------------------------------------------------------------------------------"
+
+    local speeds=("1.00" "1.25" "1.50" "2.00")
+
+    for speed in "${speeds[@]}"
+    do
+        local calc_seconds=$(echo "scale=2; $total / $speed" | bc)
+        local std=$(format_standard "$calc_seconds")
+        local det=$(format_detailed "$calc_seconds")
+        printf "%-10s | %-10s | %s\n" "${speed}x" "$std" "$det"
+    done
+}
+
+# Function to analyze the playlist content
+analyze_playlist() {
+    local url=$1
+
+    echo "Accessing playlist metadata..."
+
+    # Improved metadata extraction
+    # We use --get-filename as a trick to check if the URL is reachable/valid
+    local meta
+    meta=$(yt-dlp --flat-playlist --playlist-items 1 --print "playlist_title:%(playlist_title)s|channel:%(uploader)s" "$url" 2>/dev/null | head -n 1)
+
+    if [ -z "$meta" ]
     then
-        echo "00:00:00"
+        echo "Error: Unable to access the playlist. The URL may be invalid, private, or blocked."
         return
     fi
 
-    local h=$((total_seconds / 3600))
-    local m=$(( (total_seconds % 3600) / 60 ))
-    local s=$((total_seconds % 60))
-    printf "%02d:%02d:%02d\n" "$h" "$m" "$s"
-}
+    local p_title=$(echo "$meta" | awk -F'playlist_title:|\\|channel:' '{print $2}')
+    local p_owner=$(echo "$meta" | awk -F'\\|channel:' '{print $2}')
 
-# Function to calculate and show finishing times for different speeds
-calculate_playback_times() {
-    local total=$1
-    echo "ESTIMATED WATCH TIME AT DIFFERENT SPEEDS"
-    echo "--------------------------------------------------"
+    echo "--------------------------------------------------------------------------------"
+    echo "PLAYLIST INFO"
+    echo "Title: ${p_title:-Unknown Playlist}"
+    echo "Channel: ${p_owner:-Unknown Channel}"
+    echo "--------------------------------------------------------------------------------"
+    printf "%-5s | %-10s | %s\n" "ID" "TIME" "VIDEO TITLE"
+    echo "--------------------------------------------------------------------------------"
 
-    # We use 'bc' for floating point division
-    local s125=$(echo "scale=2; $total / 1.25" | bc)
-    local s150=$(echo "scale=2; $total / 1.5" | bc)
-    local s200=$(echo "scale=2; $total / 2.0" | bc)
-
-    printf "Standard (1.00x): %s\n" "$(format_seconds "$total")"
-    printf "Fast     (1.25x): %s\n" "$(format_seconds "$s125")"
-    printf "Faster   (1.50x): %s\n" "$(format_seconds "$s150")"
-    printf "Double   (2.00x): %s\n" "$(format_seconds "$s200")"
-}
-
-# The main logic to parse the playlist data
-analyze_playlist() {
-    local url=$1
     local total_seconds=0
     local count=0
 
-    echo ""
-    echo "Starting analysis. This might take a moment for large playlists."
-    echo "--------------------------------------------------"
-    printf "%-5s | %-10s | %s\n" "NUM" "DURATION" "TITLE"
-    echo "--------------------------------------------------"
-
-    # We use a pipe to read each line as soon as yt-dlp finds it
-    # This is memory efficient because we do not save the whole list at once
+    # Stream processing for memory efficiency
     while IFS='|' read -r duration title
     do
-        # If duration is null or not a number, we treat it as 0
-        if [[ ! "$duration" =~ ^[0-9]+$ ]]
-        then
-            duration=0
-        fi
+        # Ensure duration is a valid integer
+        if [[ ! "$duration" =~ ^[0-9]+$ ]]; then duration=0; fi
 
         count=$((count + 1))
         total_seconds=$((total_seconds + duration))
 
-        local time_str=$(format_seconds "$duration")
+        local time_label=$(format_standard "$duration")
 
-        # We print a clean row for every video found
-        printf "[%03d] | %-10s | %-50.50s\n" "$count" "$time_str" "$title"
+        # No length limit on title to prevent cutoff
+        printf "[%03d] | %-10s | %s\n" "$count" "$time_label" "$title"
 
     done < <(yt-dlp --flat-playlist --quiet --print "%(duration)s|%(title)s" "$url")
 
     if [ "$count" -eq 0 ]
     then
-        echo "No videos found. Please check the URL and try again."
+        echo "The analysis completed but no videos were found in this list."
         return
     fi
 
-    echo "--------------------------------------------------"
+    echo "--------------------------------------------------------------------------------"
     echo "SUMMARY"
-    echo "Total Videos  : $count"
-    echo "Total Duration: $(format_seconds "$total_seconds")"
-    echo "--------------------------------------------------"
+    echo "Total Videos Found: $count"
+    echo "Total Duration    : $(format_standard "$total_seconds")"
+    echo "Detailed Duration : $(format_detailed "$total_seconds")"
+    echo "--------------------------------------------------------------------------------"
 
-    calculate_playback_times "$total_seconds"
+    display_speed_table "$total_seconds"
 }
 
-# Interactive loop for the user
-start_program() {
-    check_dependencies
+# Main interface
+run_app() {
+    check_environment
 
     while true
     do
         echo ""
-        echo "=================================================="
-        echo "          PLAYLIST INSPECTOR TOOL"
-        echo "=================================================="
-        echo "Enter a YouTube playlist URL to begin."
-        echo "Enter 'q' to quit the program."
+        echo "================================================================================"
+        echo "                         YT-PLAYLIST-ANALYSER"
+        echo "================================================================================"
+        echo "Please enter the YouTube playlist URL to begin the analysis."
+        echo "To terminate the program, please type 'exit'."
         echo ""
-        read -p "URL > " input
+        read -p "Input: " user_input
 
-        if [[ "$input" == "q" || "$input" == "quit" ]]
+        if [[ "$user_input" == "exit" ]]
         then
-            echo "Thank you for using YT-Playlist-Analyser"
+            echo "Thank you for using YT-Playlist-Analyser. The session has ended."
             break
         fi
 
-        if [[ -z "$input" ]]
+        if [[ -z "$user_input" ]]
         then
-            echo "Error: Input cannot be empty."
+            echo "Notice: No input detected. Please provide a valid URL."
             continue
         fi
 
-        analyze_playlist "$input"
+        analyze_playlist "$user_input"
     done
 }
 
-# Run the program
-start_program
+run_app
